@@ -33,7 +33,6 @@
 #include "util.h"
 
 struct dpif_flow_stats;
-struct dpif_flow_attrs;
 struct ds;
 struct flow_wildcards;
 struct minimask;

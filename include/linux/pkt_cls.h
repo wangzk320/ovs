@@ -1,7 +1,7 @@
 #ifndef __LINUX_PKT_CLS_WRAPPER_H
 #define __LINUX_PKT_CLS_WRAPPER_H 1
 
-#if defined(__KERNEL__) || defined(HAVE_TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST)
+#if defined(__KERNEL__) || defined(HAVE_TCA_FLOWER_KEY_CT_STATE)
 #include_next <linux/pkt_cls.h>
 #else
 
@@ -39,7 +39,21 @@ enum {
 #define TC_ACT_QUEUED		5
 #define TC_ACT_REPEAT		6
 #define TC_ACT_REDIRECT		7
-#define TC_ACT_JUMP		0x10000000
+
+/* There is a special kind of actions called "extended actions",
+ * which need a value parameter. These have a local opcode located in
+ * the highest nibble, starting from 1. The rest of the bits
+ * are used to carry the value. These two parts together make
+ * a combined opcode.
+ */
+#define __TC_ACT_EXT_SHIFT 28
+#define __TC_ACT_EXT(local) ((local) << __TC_ACT_EXT_SHIFT)
+#define TC_ACT_EXT_VAL_MASK ((1 << __TC_ACT_EXT_SHIFT) - 1)
+#define TC_ACT_EXT_CMP(combined, opcode) \
+	(((combined) & (~TC_ACT_EXT_VAL_MASK)) == opcode)
+
+#define TC_ACT_JUMP __TC_ACT_EXT(1)
+#define TC_ACT_GOTO_CHAIN __TC_ACT_EXT(2)
 
 struct tc_police {
 	__u32			index;
@@ -196,14 +210,26 @@ enum {
 	TCA_FLOWER_KEY_IP_TTL,		/* u8 */
 	TCA_FLOWER_KEY_IP_TTL_MASK,	/* u8 */
 
+	TCA_FLOWER_KEY_CT_STATE,	/* u8 */
+	TCA_FLOWER_KEY_CT_STATE_MASK,	/* u8 */
+
+	TCA_FLOWER_KEY_RECIRC_ID,	/* u32 */
+
 	__TCA_FLOWER_MAX,
 };
+
+/* FIXME: CT_STATE flags; is that the correct place? */
+#define TCA_FLOWER_KEY_CT_FLAGS_NEW               0x01 /* Beginning of a new connection. */
+#define TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED       0x02 /* Part of an existing connection. */
+#define TCA_FLOWER_KEY_CT_FLAGS_INVALID           0x10 /* Could not track connection. */
+#define TCA_FLOWER_KEY_CT_FLAGS_TRACKED           0x20 /* Conntrack has occurred. */
+
 
 enum {
 	TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT = (1 << 0),
 	TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST = (1 << 1),
 };
 
-#endif /* __KERNEL__ || !HAVE_TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST */
+#endif /* __KERNEL__ || !HAVE_TCA_FLOWER_KEY_CT_STATE */
 
 #endif /* __LINUX_PKT_CLS_WRAPPER_H */

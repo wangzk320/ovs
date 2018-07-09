@@ -122,6 +122,7 @@ static struct ovs_mutex ufid_lock = OVS_MUTEX_INITIALIZER;
  * @ufid_node: Element in @ufid_tc hash table by ufid key.
  * @tc_node: Element in @ufid_tc hash table by prio/handle/ifindex key.
  * @ufid: ufid assigned to the flow
+ * @chain: tc chain
  * @prio: tc priority
  * @handle: tc handle
  * @ifindex: netdev ifindex.
@@ -131,6 +132,7 @@ struct ufid_tc_data {
     struct hmap_node ufid_node;
     struct hmap_node tc_node;
     ovs_u128 ufid;
+    uint32_t chain;
     uint16_t prio;
     uint32_t handle;
     int ifindex;
@@ -166,16 +168,17 @@ del_ufid_tc_mapping(const ovs_u128 *ufid)
 /* Add ufid entry to ufid_tc hashmap.
  * If entry exists already it will be replaced. */
 static void
-add_ufid_tc_mapping(const ovs_u128 *ufid, int prio, int handle,
+add_ufid_tc_mapping(const ovs_u128 *ufid, uint32_t chain, int prio, int handle,
                     struct netdev *netdev, int ifindex)
 {
     size_t ufid_hash = hash_bytes(ufid, sizeof *ufid, 0);
-    size_t tc_hash = hash_int(hash_int(prio, handle), ifindex);
+    size_t tc_hash = hash_int(hash_int(hash_int(prio, handle), ifindex), chain);
     struct ufid_tc_data *new_data = xzalloc(sizeof *new_data);
 
     del_ufid_tc_mapping(ufid);
 
     new_data->ufid = *ufid;
+    new_data->chain = chain;
     new_data->prio = prio;
     new_data->handle = handle;
     new_data->netdev = netdev_ref(netdev);
@@ -193,11 +196,12 @@ add_ufid_tc_mapping(const ovs_u128 *ufid, int prio, int handle,
  * associated netdev on success and a refcount is taken on that netdev.
  * The caller is then responsible to close the netdev.
  *
- * Returns handle if successful and fill prio and netdev for that ufid.
+ * Returns handle if successful and fill prio, chain and netdev for that ufid.
  * Otherwise returns 0.
  */
 static int
-get_ufid_tc_mapping(const ovs_u128 *ufid, int *prio, struct netdev **netdev)
+get_ufid_tc_mapping(const ovs_u128 *ufid, uint32_t *chain, int *prio,
+                    struct netdev **netdev)
 {
     size_t ufid_hash = hash_bytes(ufid, sizeof *ufid, 0);
     struct ufid_tc_data *data;
@@ -208,6 +212,9 @@ get_ufid_tc_mapping(const ovs_u128 *ufid, int *prio, struct netdev **netdev)
         if (ovs_u128_equals(*ufid, data->ufid)) {
             if (prio) {
                 *prio = data->prio;
+            }
+            if (chain) {
+                *chain = data->chain;
             }
             if (netdev) {
                 *netdev = netdev_ref(data->netdev);
@@ -227,7 +234,8 @@ get_ufid_tc_mapping(const ovs_u128 *ufid, int *prio, struct netdev **netdev)
  * Returns true on success.
  */
 static bool
-find_ufid(int prio, int handle, struct netdev *netdev, ovs_u128 *ufid)
+find_ufid(int chain, int prio, int handle, struct netdev *netdev,
+          ovs_u128 *ufid)
 {
     int ifindex = netdev_get_ifindex(netdev);
     struct ufid_tc_data *data;
@@ -235,7 +243,8 @@ find_ufid(int prio, int handle, struct netdev *netdev, ovs_u128 *ufid)
 
     ovs_mutex_lock(&ufid_lock);
     HMAP_FOR_EACH_WITH_HASH(data, tc_node, tc_hash,  &ufid_tc) {
-        if (data->prio == prio && data->handle == handle
+        if (data->chain == chain && data->prio == prio
+            && data->handle == handle
             && data->ifindex == ifindex) {
             *ufid = data->ufid;
             break;
@@ -414,7 +423,6 @@ parse_tc_flower_to_match(struct tc_flower *flower,
                          struct match *match,
                          struct nlattr **actions,
                          struct dpif_flow_stats *stats,
-                         struct dpif_flow_attrs *attrs,
                          struct ofpbuf *buf)
 {
     size_t act_off;
@@ -429,6 +437,12 @@ parse_tc_flower_to_match(struct tc_flower *flower,
     match_init_catchall(match);
     match_set_dl_src_masked(match, key->src_mac, mask->src_mac);
     match_set_dl_dst_masked(match, key->dst_mac, mask->dst_mac);
+
+    if (flower->recirc_id) {
+        match_set_recirc_id(match, flower->recirc_id);
+    } else {
+        match_set_recirc_id(match, 0);
+    }
 
     if (key->eth_type == htons(ETH_TYPE_VLAN)) {
         match_set_dl_vlan(match, htons(key->vlan_id));
@@ -486,6 +500,8 @@ parse_tc_flower_to_match(struct tc_flower *flower,
             match_set_tp_dst_masked(match, key->sctp_dst, mask->sctp_dst);
             match_set_tp_src_masked(match, key->sctp_src, mask->sctp_src);
         }
+
+        match_set_ct_state_masked(match, key->ct_state, mask->ct_state);
     }
 
     if (flower->tunnel.tunnel) {
@@ -568,6 +584,16 @@ parse_tc_flower_to_match(struct tc_flower *flower,
                 nl_msg_put_u32(buf, OVS_ACTION_ATTR_OUTPUT, odp_to_u32(outport));
             }
             break;
+            case TC_ACT_GOTO: {
+                nl_msg_put_u32(buf, OVS_ACTION_ATTR_RECIRC, action->goto_chain.recirc_id);
+            }
+            break;
+            case TC_ACT_CT: {
+                size_t ct_offset = nl_msg_start_nested(buf, OVS_ACTION_ATTR_CT);
+
+                nl_msg_end_nested(buf, ct_offset);
+            }
+            break;
             }
         }
     }
@@ -582,10 +608,6 @@ parse_tc_flower_to_match(struct tc_flower *flower,
         stats->used = flower->lastused;
     }
 
-    attrs->offloaded = (flower->offloaded_state == TC_OFFLOADED_STATE_IN_HW)
-                       || (flower->offloaded_state == TC_OFFLOADED_STATE_UNDEFINED);
-    attrs->dp_layer = "tc";
-
     return 0;
 }
 
@@ -594,7 +616,6 @@ netdev_tc_flow_dump_next(struct netdev_flow_dump *dump,
                          struct match *match,
                          struct nlattr **actions,
                          struct dpif_flow_stats *stats,
-                         struct dpif_flow_attrs *attrs,
                          ovs_u128 *ufid,
                          struct ofpbuf *rbuffer,
                          struct ofpbuf *wbuffer)
@@ -609,14 +630,14 @@ netdev_tc_flow_dump_next(struct netdev_flow_dump *dump,
             continue;
         }
 
-        if (parse_tc_flower_to_match(&flower, match, actions, stats, attrs,
+        if (parse_tc_flower_to_match(&flower, match, actions, stats,
                                      wbuffer)) {
             continue;
         }
 
         if (flower.act_cookie.len) {
             *ufid = *((ovs_u128 *) flower.act_cookie.data);
-        } else if (!find_ufid(flower.prio, flower.handle, netdev, ufid)) {
+        } else if (!find_ufid(flower.chain, flower.prio, flower.handle, netdev, ufid)) {
             continue;
         }
 
@@ -770,12 +791,6 @@ test_key_and_mask(struct match *match)
         return EOPNOTSUPP;
     }
 
-    if (mask->recirc_id && key->recirc_id) {
-        VLOG_DBG_RL(&rl, "offloading attribute recirc_id isn't supported");
-        return EOPNOTSUPP;
-    }
-    mask->recirc_id = 0;
-
     if (mask->dp_hash) {
         VLOG_DBG_RL(&rl, "offloading attribute dp_hash isn't supported");
         return EOPNOTSUPP;
@@ -794,11 +809,6 @@ test_key_and_mask(struct match *match)
     if (mask->actset_output) {
         VLOG_DBG_RL(&rl,
                     "offloading attribute actset_output isn't supported");
-        return EOPNOTSUPP;
-    }
-
-    if (mask->ct_state) {
-        VLOG_DBG_RL(&rl, "offloading attribute ct_state isn't supported");
         return EOPNOTSUPP;
     }
 
@@ -909,6 +919,7 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     uint32_t block_id = 0;
     struct nlattr *nla;
     size_t left;
+    uint32_t chain = 0;
     int prio = 0;
     int handle;
     int ifindex;
@@ -922,6 +933,18 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     }
 
     memset(&flower, 0, sizeof flower);
+
+    if (mask->recirc_id && key->recirc_id) {
+        if (!info->in_table_id) {
+            VLOG_ERR_RL(&error_rl, "flow_put: failed to offload match on recirc_id: 0x%x",
+                        key->recirc_id);
+            return -EOPNOTSUPP;
+        }
+
+        chain = info->in_table_id;
+        flower.recirc_id = key->recirc_id;
+    }
+    mask->recirc_id = 0;
 
     if (flow_tnl_dst_is_set(&key->tunnel)) {
         VLOG_DBG_RL(&rl,
@@ -1025,6 +1048,7 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             flower.mask.udp_src = mask->tp_src;
             mask->tp_src = 0;
             mask->tp_dst = 0;
+            return -EOPNOTSUPP;
         } else if (key->nw_proto == IPPROTO_SCTP) {
             flower.key.sctp_dst = key->tp_dst;
             flower.mask.sctp_dst = mask->tp_dst;
@@ -1032,6 +1056,9 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             flower.mask.sctp_src = mask->tp_src;
             mask->tp_src = 0;
             mask->tp_dst = 0;
+            return -EOPNOTSUPP;
+        } else {
+            return -EOPNOTSUPP;
         }
 
         mask->nw_tos = 0;
@@ -1053,7 +1080,18 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             memset(&mask->ipv6_src, 0, sizeof mask->ipv6_src);
             memset(&mask->ipv6_dst, 0, sizeof mask->ipv6_dst);
         }
+    } else {
+        return -EOPNOTSUPP;
     }
+
+    if (mask->ct_state) {
+        flower.key.ct_state = key->ct_state;
+        flower.mask.ct_state = mask->ct_state;
+        mask->ct_state = 0;
+    }
+    mask->ct_zone = 0;
+    mask->ct_mark = 0;
+    memset(&mask->ct_label, 0, sizeof(mask->ct_label));
 
     err = test_key_and_mask(match);
     if (err) {
@@ -1104,21 +1142,39 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             if (err) {
                 return err;
             }
+        } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_RECIRC) {
+            const uint32_t recirc_id = nl_attr_get_u32(nla);
+
+            if (!info->out_table_id) {
+                VLOG_ERR_RL(&error_rl, "flow_put: failed to offload recirc action on recirc_id: 0x%x",
+                            recirc_id);
+                return -EOPNOTSUPP;
+            }
+
+            action->goto_chain.chain = info->out_table_id;
+            action->goto_chain.recirc_id = recirc_id;
+            VLOG_INFO("%s %d %s: table mapping (out), id %d <-> table %d, using chain: %d\n", __FILE__, __LINE__, __func__, recirc_id, info->out_table_id, action->goto_chain.chain);
+            action->type = TC_ACT_GOTO;
+            flower.action_count++;
+        } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_CT) {
+            action->type = TC_ACT_CT;
+            flower.action_count++;
         } else {
-            VLOG_DBG_RL(&rl, "unsupported put action type: %d",
-                        nl_attr_type(nla));
+            VLOG_ERR("unsupported put action type: %d", nl_attr_type(nla));
             return EOPNOTSUPP;
         }
     }
 
     block_id = get_block_id_from_netdev(netdev);
-    handle = get_ufid_tc_mapping(ufid, &prio, NULL);
+    handle = get_ufid_tc_mapping(ufid, &chain, &prio, NULL);
     if (handle && prio) {
-        VLOG_DBG_RL(&rl, "updating old handle: %d prio: %d", handle, prio);
-        tc_del_filter(ifindex, prio, handle, block_id);
+        VLOG_DBG_RL(&rl, "updating old chain: %d, prio: %d, handle: %d",
+                    chain, prio, handle);
+        tc_del_filter(ifindex, chain, prio, handle, block_id);
     }
 
     if (!prio) {
+        /* TODO: get new prios per chain */
         prio = get_prio_for_tc_flower(&flower);
         if (prio == 0) {
             VLOG_ERR_RL(&rl, "couldn't get tc prio: %s", ovs_strerror(ENOSPC));
@@ -1129,9 +1185,10 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     flower.act_cookie.data = ufid;
     flower.act_cookie.len = sizeof *ufid;
 
-    err = tc_replace_flower(ifindex, prio, handle, &flower, block_id);
+    err = tc_replace_flower(ifindex, chain, prio, handle, &flower, block_id);
     if (!err) {
-        add_ufid_tc_mapping(ufid, flower.prio, flower.handle, netdev, ifindex);
+        add_ufid_tc_mapping(ufid, flower.chain, flower.prio, flower.handle,
+                            netdev, ifindex);
     }
 
     return err;
@@ -1143,7 +1200,6 @@ netdev_tc_flow_get(struct netdev *netdev OVS_UNUSED,
                    struct nlattr **actions,
                    const ovs_u128 *ufid,
                    struct dpif_flow_stats *stats,
-                   struct dpif_flow_attrs *attrs,
                    struct ofpbuf *buf)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
@@ -1151,12 +1207,13 @@ netdev_tc_flow_get(struct netdev *netdev OVS_UNUSED,
     struct tc_flower flower;
     uint32_t block_id = 0;
     odp_port_t in_port;
+    uint32_t chain = 0;
     int prio = 0;
     int ifindex;
     int handle;
     int err;
 
-    handle = get_ufid_tc_mapping(ufid, &prio, &dev);
+    handle = get_ufid_tc_mapping(ufid, &chain, &prio, &dev);
     if (!handle) {
         return ENOENT;
     }
@@ -1169,19 +1226,19 @@ netdev_tc_flow_get(struct netdev *netdev OVS_UNUSED,
         return -ifindex;
     }
 
-    VLOG_DBG_RL(&rl, "flow get (dev %s prio %d handle %d)",
-                netdev_get_name(dev), prio, handle);
+    VLOG_DBG_RL(&rl, "flow get (dev %s chain %d prio %d handle %d)",
+                netdev_get_name(dev), chain, prio, handle);
     block_id = get_block_id_from_netdev(netdev);
-    err = tc_get_flower(ifindex, prio, handle, &flower, block_id);
+    err = tc_get_flower(ifindex, chain, prio, handle, &flower, block_id);
     netdev_close(dev);
     if (err) {
-        VLOG_ERR_RL(&error_rl, "flow get failed (dev %s prio %d handle %d): %s",
-                    netdev_get_name(dev), prio, handle, ovs_strerror(err));
+        VLOG_ERR_RL(&error_rl, "flow get failed (dev %s chain %d prio %d handle %d): %s",
+                    netdev_get_name(dev), chain, prio, handle, ovs_strerror(err));
         return err;
     }
 
     in_port = netdev_ifindex_to_odp_port(ifindex);
-    parse_tc_flower_to_match(&flower, match, actions, stats, attrs, buf);
+    parse_tc_flower_to_match(&flower, match, actions, stats, buf);
 
     match->wc.masks.in_port.odp_port = u32_to_odp(UINT32_MAX);
     match->flow.in_port.odp_port = in_port;
@@ -1197,12 +1254,13 @@ netdev_tc_flow_del(struct netdev *netdev OVS_UNUSED,
     struct tc_flower flower;
     uint32_t block_id = 0;
     struct netdev *dev;
+    uint32_t chain = 0;
     int prio = 0;
     int ifindex;
     int handle;
     int error;
 
-    handle = get_ufid_tc_mapping(ufid, &prio, &dev);
+    handle = get_ufid_tc_mapping(ufid, &chain, &prio, &dev);
     if (!handle) {
         return ENOENT;
     }
@@ -1219,14 +1277,14 @@ netdev_tc_flow_del(struct netdev *netdev OVS_UNUSED,
 
     if (stats) {
         memset(stats, 0, sizeof *stats);
-        if (!tc_get_flower(ifindex, prio, handle, &flower, block_id)) {
+        if (!tc_get_flower(ifindex, chain, prio, handle, &flower, block_id)) {
             stats->n_packets = get_32aligned_u64(&flower.stats.n_packets);
             stats->n_bytes = get_32aligned_u64(&flower.stats.n_bytes);
             stats->used = flower.lastused;
         }
     }
 
-    error = tc_del_filter(ifindex, prio, handle, block_id);
+    error = tc_del_filter(ifindex, chain, prio, handle, block_id);
     del_ufid_tc_mapping(ufid);
 
     netdev_close(dev);
@@ -1242,7 +1300,7 @@ probe_multi_mask_per_prio(int ifindex)
     int error;
 
     error = tc_add_del_ingress_qdisc(ifindex, true, block_id);
-    if (error) {
+    if (error && error != EEXIST) {
         return;
     }
 
@@ -1253,7 +1311,7 @@ probe_multi_mask_per_prio(int ifindex)
     memset(&flower.key.dst_mac, 0x11, sizeof flower.key.dst_mac);
     memset(&flower.mask.dst_mac, 0xff, sizeof flower.mask.dst_mac);
 
-    error = tc_replace_flower(ifindex, 1, 1, &flower, block_id);
+    error = tc_replace_flower(ifindex, 0, 1, 1, &flower, block_id);
     if (error) {
         goto out;
     }
@@ -1261,14 +1319,14 @@ probe_multi_mask_per_prio(int ifindex)
     memset(&flower.key.src_mac, 0x11, sizeof flower.key.src_mac);
     memset(&flower.mask.src_mac, 0xff, sizeof flower.mask.src_mac);
 
-    error = tc_replace_flower(ifindex, 1, 2, &flower, block_id);
-    tc_del_filter(ifindex, 1, 1, block_id);
+    error = tc_replace_flower(ifindex, 0, 1, 2, &flower, block_id);
+    tc_del_filter(ifindex, 0, 1, 1, block_id);
 
     if (error) {
         goto out;
     }
 
-    tc_del_filter(ifindex, 1, 2, block_id);
+    tc_del_filter(ifindex, 0, 1, 2, block_id);
 
     multi_mask_per_prio = true;
     VLOG_INFO("probe tc: multiple masks on single tc prio is supported.");
@@ -1321,6 +1379,7 @@ netdev_tc_init_flow_api(struct netdev *netdev)
     }
 
     block_id = get_block_id_from_netdev(netdev);
+    error = tc_add_del_ingress_qdisc(ifindex, false, block_id);
     error = tc_add_del_ingress_qdisc(ifindex, true, block_id);
 
     if (error && error != EEXIST) {

@@ -1540,6 +1540,7 @@ handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
         const struct dp_packet *packet = upcall->packet;
         struct ukey_op *op;
 
+
         if (should_install_flow(udpif, upcall)) {
             struct udpif_key *ukey = upcall->ukey;
 
@@ -2290,6 +2291,8 @@ static void
 put_op_init(struct ukey_op *op, struct udpif_key *ukey,
             enum dpif_flow_put_flags flags)
 {
+    const struct recirc_id_node *recirc_node;
+
     op->ukey = ukey;
     op->dop.type = DPIF_OP_FLOW_PUT;
     op->dop.flow_put.flags = flags;
@@ -2302,6 +2305,28 @@ put_op_init(struct ukey_op *op, struct udpif_key *ukey,
     op->dop.flow_put.stats = NULL;
     ukey_get_actions(ukey, &op->dop.flow_put.actions,
                      &op->dop.flow_put.actions_len);
+
+    if (ukey->key_recirc_id) {
+        recirc_node = recirc_id_node_find(ukey->key_recirc_id);
+        if (recirc_node) {
+            const struct frozen_state *state = &recirc_node->state;
+
+            op->dop.flow_put.in_table_id = state->table_id;
+        }
+    }
+    else
+        op->dop.flow_put.in_table_id = 0;
+
+    if (ukey->recircs.recirc[0]) {
+        recirc_node = recirc_id_node_find(ukey->recircs.recirc[0]);
+        if (recirc_node) {
+            const struct frozen_state *state = &recirc_node->state;
+
+            op->dop.flow_put.out_table_id = state->table_id;
+        }
+    }
+    else
+        op->dop.flow_put.out_table_id = 0;
 }
 
 /* Executes datapath operations 'ops' and attributes stats retrieved from the

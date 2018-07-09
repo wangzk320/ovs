@@ -27,6 +27,7 @@
 #include <linux/tc_act/tc_pedit.h>
 #include <linux/tc_act/tc_tunnel_key.h>
 #include <linux/tc_act/tc_vlan.h>
+#include <linux/tc_act/tc_ct.h>
 #include <linux/gen_stats.h>
 #include <net/if.h>
 #include <unistd.h>
@@ -49,7 +50,9 @@
 
 #if TCA_MAX < 14
 #define TCA_INGRESS_BLOCK 13
+#define TCA_CHAIN 11
 #endif
+
 
 VLOG_DEFINE_THIS_MODULE(tc);
 
@@ -221,6 +224,7 @@ tc_add_del_ingress_qdisc(int ifindex, bool add, uint32_t block_id)
 static const struct nl_policy tca_policy[] = {
     [TCA_KIND] = { .type = NL_A_STRING, .optional = false, },
     [TCA_OPTIONS] = { .type = NL_A_NESTED, .optional = false, },
+    [TCA_CHAIN] = { .type = NL_A_U32, .optional = true, },
     [TCA_STATS] = { .type = NL_A_UNSPEC,
                     .min_len = sizeof(struct tc_stats), .optional = true, },
     [TCA_STATS2] = { .type = NL_A_NESTED, .optional = true, },
@@ -306,6 +310,11 @@ static const struct nl_policy tca_flower_policy[] = {
                                    .optional = true, },
     [TCA_FLOWER_KEY_TCP_FLAGS_MASK] = { .type = NL_A_U16,
                                         .optional = true, },
+    [TCA_FLOWER_KEY_CT_STATE] = { .type = NL_A_U8,
+                                .optional = true, },
+    [TCA_FLOWER_KEY_CT_STATE_MASK] = { .type = NL_A_U8,
+                                .optional = true, },
+    [TCA_FLOWER_KEY_RECIRC_ID] = { .type = NL_A_U32, .optional = true, },
 };
 
 static void
@@ -471,28 +480,11 @@ nl_parse_flower_ip(struct nlattr **attrs, struct tc_flower *flower) {
         key->ip_ttl = nl_attr_get_u8(attrs[TCA_FLOWER_KEY_IP_TTL]);
         mask->ip_ttl = nl_attr_get_u8(attrs[TCA_FLOWER_KEY_IP_TTL_MASK]);
     }
-}
 
-static enum tc_offloaded_state
-nl_get_flower_offloaded_state(struct nlattr **attrs)
-{
-    uint32_t flower_flags = 0;
-
-    if (attrs[TCA_FLOWER_FLAGS]) {
-        flower_flags = nl_attr_get_u32(attrs[TCA_FLOWER_FLAGS]);
-        if (flower_flags & TCA_CLS_FLAGS_NOT_IN_HW) {
-            return TC_OFFLOADED_STATE_NOT_IN_HW;
-        } else if (flower_flags & TCA_CLS_FLAGS_IN_HW) {
-            return TC_OFFLOADED_STATE_IN_HW;
-        }
+    if (attrs[TCA_FLOWER_KEY_CT_STATE_MASK]) {
+        key->ct_state = nl_attr_get_u8(attrs[TCA_FLOWER_KEY_CT_STATE]);
+        mask->ct_state = nl_attr_get_u8(attrs[TCA_FLOWER_KEY_CT_STATE_MASK]);
     }
-    return TC_OFFLOADED_STATE_UNDEFINED;
-}
-
-static void
-nl_parse_flower_flags(struct nlattr **attrs, struct tc_flower *flower)
-{
-    flower->offloaded_state = nl_get_flower_offloaded_state(attrs);
 }
 
 static const struct nl_policy pedit_policy[] = {
@@ -654,6 +646,7 @@ nl_parse_act_tunnel_key(struct nlattr *options, struct tc_flower *flower)
     return 0;
 }
 
+#define TCA_GACT_RECIRC_ID 5
 static const struct nl_policy gact_policy[] = {
     [TCA_GACT_PARMS] = { .type = NL_A_UNSPEC,
                          .min_len = sizeof(struct tc_gact),
@@ -661,6 +654,8 @@ static const struct nl_policy gact_policy[] = {
     [TCA_GACT_TM] = { .type = NL_A_UNSPEC,
                       .min_len = sizeof(struct tcf_t),
                       .optional = false, },
+    [TCA_GACT_RECIRC_ID] = { .type = NL_A_U32,
+                              .optional = true, },
 };
 
 static int
@@ -684,12 +679,14 @@ nl_parse_tcf(const struct tcf_t *tm, struct tc_flower *flower)
 }
 
 static int
-nl_parse_act_drop(struct nlattr *options, struct tc_flower *flower)
+nl_parse_act_gact(struct nlattr *options, struct tc_flower *flower)
 {
     struct nlattr *gact_attrs[ARRAY_SIZE(gact_policy)];
     const struct tc_gact *p;
     struct nlattr *gact_parms;
     const struct tcf_t *tm;
+    struct tc_action *action;
+    uint32_t recirc_id = 0;
 
     if (!nl_parse_nested(options, gact_policy, gact_attrs,
                          ARRAY_SIZE(gact_policy))) {
@@ -700,7 +697,17 @@ nl_parse_act_drop(struct nlattr *options, struct tc_flower *flower)
     gact_parms = gact_attrs[TCA_GACT_PARMS];
     p = nl_attr_get_unspec(gact_parms, sizeof *p);
 
-    if (p->action != TC_ACT_SHOT) {
+    if (TC_ACT_EXT_CMP(p->action, TC_ACT_GOTO_CHAIN)) {
+        if (gact_attrs[TCA_GACT_RECIRC_ID]) {
+            recirc_id = nl_attr_get_u32(gact_attrs[TCA_GACT_RECIRC_ID]);
+        }
+
+        action = &flower->actions[flower->action_count++];
+        action->goto_chain.chain = p->action & TC_ACT_EXT_VAL_MASK;
+        action->goto_chain.recirc_id = recirc_id;
+        action->type = TC_ACT_GOTO;
+    }
+    else if (p->action != TC_ACT_SHOT) {
         VLOG_ERR_RL(&error_rl, "unknown gact action: %d", p->action);
         return EINVAL;
     }
@@ -756,6 +763,33 @@ nl_parse_act_mirred(struct nlattr *options, struct tc_flower *flower)
 
     return 0;
 }
+
+static const struct nl_policy conntrack_policy[] = {
+    [TCA_CONNTRACK_PARMS] = { .type = NL_A_UNSPEC,
+                              .min_len = sizeof(struct tc_conntrack),
+                              .optional = false, },
+};
+
+static int
+nl_parse_act_conntrack(struct nlattr *options, struct tc_flower *flower)
+{
+    struct nlattr *conntrack_attrs[ARRAY_SIZE(conntrack_policy)];
+    //const struct tc_conntrack *v;
+    //const struct nlattr *conntrack_parms;
+    struct tc_action *action;
+
+    if (!nl_parse_nested(options, conntrack_policy, conntrack_attrs,
+                         ARRAY_SIZE(conntrack_policy))) {
+        VLOG_ERR_RL(&error_rl, "failed to parse conntrack action options");
+        return EPROTO;
+    }
+
+    action = &flower->actions[flower->action_count++];
+    action->type = TC_ACT_CT;
+
+    return 0;
+}
+
 
 static const struct nl_policy vlan_policy[] = {
     [TCA_VLAN_PARMS] = { .type = NL_A_UNSPEC,
@@ -877,7 +911,7 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower)
     act_cookie = action_attrs[TCA_ACT_COOKIE];
 
     if (!strcmp(act_kind, "gact")) {
-        err = nl_parse_act_drop(act_options, flower);
+        err = nl_parse_act_gact(act_options, flower);
     } else if (!strcmp(act_kind, "mirred")) {
         err = nl_parse_act_mirred(act_options, flower);
     } else if (!strcmp(act_kind, "vlan")) {
@@ -888,6 +922,8 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower)
         err = nl_parse_act_pedit(act_options, flower);
     } else if (!strcmp(act_kind, "csum")) {
         nl_parse_act_csum(act_options, flower);
+    } else if (!strcmp(act_kind, "ct")) {
+        nl_parse_act_conntrack(act_options, flower);
     } else {
         VLOG_ERR_RL(&error_rl, "unknown tc action kind: %s", act_kind);
         err = EINVAL;
@@ -975,11 +1011,14 @@ nl_parse_flower_options(struct nlattr *nl_options, struct tc_flower *flower)
         return EPROTO;
     }
 
+    if (attrs[TCA_FLOWER_KEY_RECIRC_ID]) {
+        flower->recirc_id = nl_attr_get_u32(attrs[TCA_FLOWER_KEY_RECIRC_ID]);
+    }
+
     nl_parse_flower_eth(attrs, flower);
     nl_parse_flower_vlan(attrs, flower);
     nl_parse_flower_ip(attrs, flower);
     nl_parse_flower_tunnel(attrs, flower);
-    nl_parse_flower_flags(attrs, flower);
     return nl_parse_flower_actions(attrs, flower);
 }
 
@@ -1010,6 +1049,10 @@ parse_netlink_to_tc_flower(struct ofpbuf *reply, struct tc_flower *flower)
                          tca_policy, ta, ARRAY_SIZE(ta))) {
         VLOG_ERR_RL(&error_rl, "failed to parse tca policy");
         return EPROTO;
+    }
+
+    if (ta[TCA_CHAIN]) {
+        flower->chain = nl_attr_get_u32(ta[TCA_CHAIN]);
     }
 
     kind = nl_attr_get_string(ta[TCA_KIND]);
@@ -1056,7 +1099,8 @@ tc_flush(int ifindex, uint32_t block_id)
 }
 
 int
-tc_del_filter(int ifindex, int prio, int handle, uint32_t block_id)
+tc_del_filter(int ifindex, uint32_t chain, int prio, int handle,
+              uint32_t block_id)
 {
     struct ofpbuf request;
     struct tcmsg *tcmsg;
@@ -1070,6 +1114,10 @@ tc_del_filter(int ifindex, int prio, int handle, uint32_t block_id)
     tcmsg->tcm_info = tc_make_handle(prio, 0);
     tcmsg->tcm_handle = handle;
 
+    if (chain) {
+        nl_msg_put_u32(&request, TCA_CHAIN, chain);
+    }
+
     error = tc_transact(&request, &reply);
     if (!error) {
         ofpbuf_delete(reply);
@@ -1078,8 +1126,8 @@ tc_del_filter(int ifindex, int prio, int handle, uint32_t block_id)
 }
 
 int
-tc_get_flower(int ifindex, int prio, int handle, struct tc_flower *flower,
-              uint32_t block_id)
+tc_get_flower(int ifindex, uint32_t chain, int prio, int handle,
+              struct tc_flower *flower, uint32_t block_id)
 {
     struct ofpbuf request;
     struct tcmsg *tcmsg;
@@ -1092,6 +1140,10 @@ tc_get_flower(int ifindex, int prio, int handle, struct tc_flower *flower,
     tcmsg->tcm_parent = block_id ? : TC_INGRESS_PARENT;
     tcmsg->tcm_info = tc_make_handle(prio, 0);
     tcmsg->tcm_handle = handle;
+
+    if (chain) {
+        nl_msg_put_u32(&request, TCA_CHAIN, chain);
+    }
 
     error = tc_transact(&request, &reply);
     if (error) {
@@ -1241,7 +1293,22 @@ nl_msg_put_act_tunnel_key_set(struct ofpbuf *request, ovs_be64 id,
 }
 
 static void
-nl_msg_put_act_drop(struct ofpbuf *request)
+nl_msg_put_act_conntrack(struct ofpbuf *request)
+{
+    size_t offset;
+
+    nl_msg_put_string(request, TCA_ACT_KIND, "ct");
+    offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
+    {
+        struct tc_conntrack c = { .action = TC_ACT_PIPE };
+
+        nl_msg_put_unspec(request, TCA_CONNTRACK_PARMS, &c, sizeof c);
+    }
+    nl_msg_end_nested(request, offset);
+}
+
+static void
+nl_msg_put_act_gact(struct ofpbuf *request, uint32_t chain, uint32_t recirc_id)
 {
     size_t offset;
 
@@ -1249,6 +1316,11 @@ nl_msg_put_act_drop(struct ofpbuf *request)
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
     {
         struct tc_gact p = { .action = TC_ACT_SHOT };
+
+        if (chain) {
+            p.action = TC_ACT_GOTO_CHAIN | chain;
+            nl_msg_put_u32(request, TCA_GACT_RECIRC_ID, recirc_id);
+        }
 
         nl_msg_put_unspec(request, TCA_GACT_PARMS, &p, sizeof p);
     }
@@ -1440,6 +1512,7 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
     uint16_t act_index = 1;
     struct tc_action *action;
     int i, ifindex = 0;
+    bool drop_rule = true;
 
     offset = nl_msg_start_nested(request, TCA_FLOWER_ACT);
     {
@@ -1495,6 +1568,7 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
             }
             break;
             case TC_ACT_OUTPUT: {
+                drop_rule = false;
                 ifindex = action->ifindex_out;
                 if (ifindex < 1) {
                     VLOG_ERR_RL(&error_rl, "%s: invalid ifindex: %d, type: %d",
@@ -1513,12 +1587,27 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
                 nl_msg_end_nested(request, act_offset);
             }
             break;
+            case TC_ACT_GOTO: {
+                drop_rule = false;
+                act_offset = nl_msg_start_nested(request, act_index++);
+                nl_msg_put_act_gact(request, action->goto_chain.chain, action->goto_chain.recirc_id);
+                nl_msg_put_act_cookie(request, &flower->act_cookie);
+                nl_msg_end_nested(request, act_offset);
+            }
+            break;
+            case TC_ACT_CT: {
+                drop_rule = false;
+                act_offset = nl_msg_start_nested(request, act_index++);
+                nl_msg_put_act_conntrack(request);
+                nl_msg_end_nested(request, act_offset);
+            }
+            break;
             }
         }
     }
-    if (!ifindex) {
+    if (drop_rule) {
         act_offset = nl_msg_start_nested(request, act_index++);
-        nl_msg_put_act_drop(request);
+        nl_msg_put_act_gact(request, 0, 0);
         nl_msg_put_act_cookie(request, &flower->act_cookie);
         nl_msg_end_nested(request, act_offset);
     }
@@ -1612,6 +1701,8 @@ nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
             FLOWER_PUT_MASKED_VALUE(sctp_src, TCA_FLOWER_KEY_SCTP_SRC);
             FLOWER_PUT_MASKED_VALUE(sctp_dst, TCA_FLOWER_KEY_SCTP_DST);
         }
+
+        FLOWER_PUT_MASKED_VALUE(ct_state, TCA_FLOWER_KEY_CT_STATE);
     }
 
     if (host_eth_type == ETH_P_IP) {
@@ -1639,6 +1730,7 @@ nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
     }
 
     nl_msg_put_u32(request, TCA_FLOWER_FLAGS, tc_get_tc_cls_policy(tc_policy));
+    nl_msg_put_u32(request, TCA_FLOWER_KEY_RECIRC_ID, flower->recirc_id);
 
     if (flower->tunnel.tunnel) {
         nl_msg_put_flower_tunnel(request, flower);
@@ -1648,7 +1740,7 @@ nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
 }
 
 int
-tc_replace_flower(int ifindex, uint16_t prio, uint32_t handle,
+tc_replace_flower(int ifindex, uint32_t chain, uint16_t prio, uint32_t handle,
                   struct tc_flower *flower, uint32_t block_id)
 {
     struct ofpbuf request;
@@ -1667,6 +1759,11 @@ tc_replace_flower(int ifindex, uint16_t prio, uint32_t handle,
     tcmsg->tcm_handle = handle;
 
     nl_msg_put_string(&request, TCA_KIND, "flower");
+    if (chain) {
+        nl_msg_put_u32(&request, TCA_CHAIN, chain);
+        flower->chain = chain;
+    }
+
     basic_offset = nl_msg_start_nested(&request, TCA_OPTIONS);
     {
         error = nl_msg_put_flower_options(&request, flower);

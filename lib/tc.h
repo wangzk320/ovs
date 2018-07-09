@@ -90,6 +90,8 @@ struct tc_flower_key {
     uint16_t vlan_id;
     uint8_t vlan_prio;
 
+    uint8_t ct_state;
+
     ovs_be16 encap_eth_type;
 
     uint8_t flags;
@@ -112,10 +114,17 @@ enum tc_action_type {
     TC_ACT_PEDIT,
     TC_ACT_VLAN_POP,
     TC_ACT_VLAN_PUSH,
+    TC_ACT_GOTO,
+    TC_ACT_CT,
 };
 
 struct tc_action {
     union {
+        struct {
+            int chain;
+            uint32_t recirc_id;
+        } goto_chain;
+
         int ifindex_out;
 
         struct {
@@ -141,15 +150,12 @@ struct tc_action {
      enum tc_action_type type;
 };
 
-enum tc_offloaded_state {
-    TC_OFFLOADED_STATE_UNDEFINED,
-    TC_OFFLOADED_STATE_IN_HW,
-    TC_OFFLOADED_STATE_NOT_IN_HW,
-};
-
 struct tc_flower {
-    uint32_t handle;
+    uint32_t chain;
     uint32_t prio;
+    uint32_t handle;
+
+    uint32_t recirc_id;
 
     struct tc_flower_key key;
     struct tc_flower_key mask;
@@ -186,8 +192,6 @@ struct tc_flower {
     struct tc_cookie act_cookie;
 
     bool needs_full_ip_proto_mask;
-
-    enum tc_offloaded_state offloaded_state;
 };
 
 /* assert that if we overflow with a masked write of uint32_t to the last byte
@@ -197,10 +201,12 @@ BUILD_ASSERT_DECL(offsetof(struct tc_flower, rewrite)
                   + MEMBER_SIZEOF(struct tc_flower, rewrite)
                   + sizeof(uint32_t) - 2 < sizeof(struct tc_flower));
 
-int tc_replace_flower(int ifindex, uint16_t prio, uint32_t handle,
-                      struct tc_flower *flower, uint32_t block_id);
-int tc_del_filter(int ifindex, int prio, int handle, uint32_t block_id);
-int tc_get_flower(int ifindex, int prio, int handle,
+int tc_replace_flower(int ifindex, uint32_t chain, uint16_t prio,
+                      uint32_t handle, struct tc_flower *flower,
+                      uint32_t block_id);
+int tc_del_filter(int ifindex, uint32_t chain, int prio, int handle,
+                  uint32_t block_id);
+int tc_get_flower(int ifindex, uint32_t chain, int prio, int handle,
                   struct tc_flower *flower, uint32_t block_id);
 int tc_flush(int ifindex, uint32_t block_id);
 int tc_dump_flower_start(int ifindex, struct nl_dump *dump, uint32_t block_id);

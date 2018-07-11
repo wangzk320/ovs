@@ -414,7 +414,6 @@ parse_tc_flower_to_match(struct tc_flower *flower,
                          struct match *match,
                          struct nlattr **actions,
                          struct dpif_flow_stats *stats,
-                         struct dpif_flow_attrs *attrs,
                          struct ofpbuf *buf)
 {
     size_t act_off;
@@ -582,10 +581,6 @@ parse_tc_flower_to_match(struct tc_flower *flower,
         stats->used = flower->lastused;
     }
 
-    attrs->offloaded = (flower->offloaded_state == TC_OFFLOADED_STATE_IN_HW)
-                       || (flower->offloaded_state == TC_OFFLOADED_STATE_UNDEFINED);
-    attrs->dp_layer = "tc";
-
     return 0;
 }
 
@@ -594,7 +589,6 @@ netdev_tc_flow_dump_next(struct netdev_flow_dump *dump,
                          struct match *match,
                          struct nlattr **actions,
                          struct dpif_flow_stats *stats,
-                         struct dpif_flow_attrs *attrs,
                          ovs_u128 *ufid,
                          struct ofpbuf *rbuffer,
                          struct ofpbuf *wbuffer)
@@ -609,7 +603,7 @@ netdev_tc_flow_dump_next(struct netdev_flow_dump *dump,
             continue;
         }
 
-        if (parse_tc_flower_to_match(&flower, match, actions, stats, attrs,
+        if (parse_tc_flower_to_match(&flower, match, actions, stats,
                                      wbuffer)) {
             continue;
         }
@@ -1143,7 +1137,6 @@ netdev_tc_flow_get(struct netdev *netdev OVS_UNUSED,
                    struct nlattr **actions,
                    const ovs_u128 *ufid,
                    struct dpif_flow_stats *stats,
-                   struct dpif_flow_attrs *attrs,
                    struct ofpbuf *buf)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
@@ -1181,7 +1174,7 @@ netdev_tc_flow_get(struct netdev *netdev OVS_UNUSED,
     }
 
     in_port = netdev_ifindex_to_odp_port(ifindex);
-    parse_tc_flower_to_match(&flower, match, actions, stats, attrs, buf);
+    parse_tc_flower_to_match(&flower, match, actions, stats, buf);
 
     match->wc.masks.in_port.odp_port = u32_to_odp(UINT32_MAX);
     match->flow.in_port.odp_port = in_port;

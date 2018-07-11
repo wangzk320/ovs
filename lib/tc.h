@@ -141,12 +141,6 @@ struct tc_action {
      enum tc_action_type type;
 };
 
-enum tc_offloaded_state {
-    TC_OFFLOADED_STATE_UNDEFINED,
-    TC_OFFLOADED_STATE_IN_HW,
-    TC_OFFLOADED_STATE_NOT_IN_HW,
-};
-
 struct tc_flower {
     uint32_t handle;
     uint32_t prio;
@@ -186,8 +180,6 @@ struct tc_flower {
     struct tc_cookie act_cookie;
 
     bool needs_full_ip_proto_mask;
-
-    enum tc_offloaded_state offloaded_state;
 };
 
 /* assert that if we overflow with a masked write of uint32_t to the last byte

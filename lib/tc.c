@@ -622,8 +622,6 @@ nl_parse_act_tunnel_key(struct nlattr *options, struct tc_flower *flower)
         }
         action->encap.id = id ? be32_to_be64(nl_attr_get_be32(id)) : 0;
         action->encap.tp_dst = dst_port ? nl_attr_get_be16(dst_port) : 0;
-    } else if (tun->t_action == TCA_TUNNEL_KEY_ACT_RELEASE) {
-        flower->tunnel.tunnel = true;
     } else {
         VLOG_ERR_RL(&error_rl, "unknown tunnel actions: %d, %d",
                     tun->action, tun->t_action);
@@ -1422,12 +1420,6 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
     {
         int error;
 
-        if (flower->tunnel.tunnel) {
-            act_offset = nl_msg_start_nested(request, act_index++);
-            nl_msg_put_act_tunnel_key_release(request);
-            nl_msg_end_nested(request, act_offset);
-        }
-
         action = flower->actions;
         for (i = 0; i < flower->action_count; i++, action++) {
             switch (action->type) {
@@ -1617,7 +1609,7 @@ nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
 
     nl_msg_put_u32(request, TCA_FLOWER_FLAGS, tc_get_tc_cls_policy(tc_policy));
 
-    if (flower->tunnel.tunnel) {
+    if (flower->tunnel.id) {
         nl_msg_put_flower_tunnel(request, flower);
     }
 

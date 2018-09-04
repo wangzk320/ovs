@@ -487,7 +487,7 @@ parse_tc_flower_to_match(struct tc_flower *flower,
         }
     }
 
-    if (flower->tunnel.tunnel) {
+    if (flower->tunnel.id) {
         match_set_tun_id(match, flower->tunnel.id);
         if (flower->tunnel.ipv4.ipv4_dst) {
             match_set_tun_src(match, flower->tunnel.ipv4.ipv4_src);
@@ -931,7 +931,6 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
         flower.tunnel.ipv6.ipv6_dst = tnl->ipv6_dst;
         flower.tunnel.tp_src = tnl->tp_src;
         flower.tunnel.tp_dst = tnl->tp_dst;
-        flower.tunnel.tunnel = true;
     }
     memset(&mask->tunnel, 0, sizeof mask->tunnel);
 

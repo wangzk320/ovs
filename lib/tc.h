@@ -163,7 +163,6 @@ struct tc_flower {
     uint32_t csum_update_flags;
 
     struct {
-        bool tunnel;
         struct {
             ovs_be32 ipv4_src;
             ovs_be32 ipv4_dst;

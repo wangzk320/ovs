@@ -943,7 +943,7 @@ udpif_revalidator(void *arg)
                           duration);
             }
 
-            poll_timer_wait_until(start_time + MIN(ofproto_max_idle, 500));
+            poll_timer_wait_until(start_time + MIN(ofproto_max_idle, 60 * 1000));
             seq_wait(udpif->reval_seq, last_reval_seq);
             latch_wait(&udpif->exit_latch);
             latch_wait(&udpif->pause_latch);

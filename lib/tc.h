@@ -90,6 +90,8 @@ struct tc_flower_key {
     uint16_t vlan_id;
     uint8_t vlan_prio;
 
+    uint8_t ct_state;
+
     ovs_be16 encap_eth_type;
 
     uint8_t flags;

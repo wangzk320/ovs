@@ -309,6 +309,10 @@ static const struct nl_policy tca_flower_policy[] = {
                                    .optional = true, },
     [TCA_FLOWER_KEY_TCP_FLAGS_MASK] = { .type = NL_A_U16,
                                         .optional = true, },
+    [TCA_FLOWER_KEY_CT_STATE] = { .type = NL_A_U8,
+                                .optional = true, },
+    [TCA_FLOWER_KEY_CT_STATE_MASK] = { .type = NL_A_U8,
+                                .optional = true, },
 };
 
 static void
@@ -474,6 +478,10 @@ nl_parse_flower_ip(struct nlattr **attrs, struct tc_flower *flower) {
         key->ip_ttl = nl_attr_get_u8(attrs[TCA_FLOWER_KEY_IP_TTL]);
         mask->ip_ttl = nl_attr_get_u8(attrs[TCA_FLOWER_KEY_IP_TTL_MASK]);
     }
+
+    if (attrs[TCA_FLOWER_KEY_CT_STATE_MASK]) {
+        key->ct_state = nl_attr_get_u8(attrs[TCA_FLOWER_KEY_CT_STATE]);
+        mask->ct_state = nl_attr_get_u8(attrs[TCA_FLOWER_KEY_CT_STATE_MASK]);
 }
 
 static const struct nl_policy pedit_policy[] = {
@@ -1617,6 +1625,8 @@ nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
             FLOWER_PUT_MASKED_VALUE(sctp_src, TCA_FLOWER_KEY_SCTP_SRC);
             FLOWER_PUT_MASKED_VALUE(sctp_dst, TCA_FLOWER_KEY_SCTP_DST);
         }
+
+        FLOWER_PUT_MASKED_VALUE(ct_state, TCA_FLOWER_KEY_CT_STATE);
     }
 
     if (host_eth_type == ETH_P_IP) {

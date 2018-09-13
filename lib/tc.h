@@ -118,6 +118,7 @@ enum tc_action_type {
     TC_ACT_VLAN_POP,
     TC_ACT_VLAN_PUSH,
     TC_ACT_GOTO,
+    TC_ACT_CT,
 };
 
 struct tc_action {

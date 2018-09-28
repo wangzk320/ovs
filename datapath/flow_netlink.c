@@ -2581,7 +2581,7 @@ static int validate_and_copy_set_tun(const struct nlattr *attr,
 	 */
 	ip_tunnel_info_opts_set(tun_info,
 				TUN_METADATA_OPTS(&key, key.tun_opts_len),
-				key.tun_opts_len);
+				key.tun_opts_len, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 	add_nested_action_end(*sfa, start);
 
 	return err;
